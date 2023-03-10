@@ -1,0 +1,446 @@
+---
+title: "RNA-Seq: wild type vs. triple mutant infection"
+author: "HCS"
+date:  "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: false
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r eval=FALSE, include=FALSE}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("GO.db", ask = FALSE)
+BiocManager::install("AnnotationDbi", ask = FALSE)
+BiocManager::install("goseq", ask = FALSE)
+BiocManager::install("org.Hs.eg.db", ask = FALSE)
+BiocManager::install("clusterProfiler", ask = FALSE)
+BiocManager::install("biomaRt", ask = FALSE)
+devtools::install_github("pachterlab/sleuth")
+```
+
+```{r}
+## Load packages
+library(readxl)
+library(openxlsx)
+library(knitr)
+library(kableExtra)
+library(ggVennDiagram)
+library(gplots)
+library(RColorBrewer)
+library(goseq)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(GO.db)
+library(clusterProfiler)
+library(sleuth)
+library(tidyverse)
+```
+
+
+
+```{r message=FALSE}
+## Read data
+
+# Sleuth object
+so_list = readRDS("so_list.RDS")
+
+# p53Genes =read_excel("Y:/MionaNGS/Figure4.Fischer.et.al.xlsx")
+p53Genes = read_excel("supplementaryTableS3.Fischer.et.al.xlsx")
+# sleuthRes1 = read_csv("Y:/MionaNGS/results/mock_wt_i_genes_WALD.csv")
+# sleuthRes2 = read_csv("Y:/MionaNGS/results/wt_i_3M_i_genes_WALD.csv")
+sampleTab = read_csv("sampleTable.csv")
+```
+
+
+# QC plots
+
+
+
+```{r}
+### Select sleuth object
+so = so_list$`c("mock", "wt_i", "3M_i")`
+```
+
+
+### Principal component analysis of all samples
+Investigating similarity of samples using the two main components of PCA
+```{r}
+plot_pca(so, 
+         text_labels = TRUE,
+         color_by = 'condition')
+```
+
+
+
+### Count distributions
+
+#### Histogram of Count distributions - all transcripts
+This histogram plot shows density distributions of transcript-counts comparing samples. They should be similar for testing differential gene/transcript expression. This plot is not filtered for rare transcripts.
+```{r}
+plot_group_density(so, 
+                   use_filtered = FALSE, 
+                   units = "est_counts",
+                   trans = "log", 
+                   grouping = "condition")
+```
+
+
+#### Histogram of Count distributions - filtering rare transcripts
+In this plot, rare transcripts are filtered out for a better depiction of the density distribution of more abundant transcripts.
+```{r}
+plot_group_density(so, 
+                   use_filtered = TRUE, 
+                   units = "est_counts",
+                   trans = "log", 
+                   grouping = "condition")
+```
+
+###  Example transcript
+Here, the expression of transcripts with bootstrap variation is plotted to visualize both biological and technical variation for the selected transcript.
+```{r}
+
+sleuth_results_oe <- sleuth_results(so, 
+                                    test = 'conditionmock', 
+                                    show_all = TRUE, pval_aggregate = FALSE)
+sig_transcripts <- sleuth_results_oe %>% 
+    filter(qval < 0.05)
+
+plot_bootstrap(so, 
+               target_id = sig_transcripts$target_id[1], 
+               units = "est_counts", 
+               color_by = "condition")
+```
+
+
+### Heatmap of normalized transcript counts
+The heatmap shows normalized counts of the 500 most variable transcripts across samples. The purple, orange and red bars represent triple mutant infection, mock and wild type infection, respectively.
+```{r fig.height=10, fig.width=10}
+norm_data = sleuth_to_matrix(so_list$`c("mock", "wt_i", "3M_i")`, which_df = "obs_norm", which_units = "est_counts")
+included_transcripts = sleuth_results(so_list$`c("mock", "wt_i", "3M_i")`, 'conditionmock', show_all = FALSE, pval_aggregate = F)$target_id
+var_transcripts = apply(norm_data[included_transcripts,], 1, sd)
+select_var = names(sort(var_transcripts, decreasing=TRUE))[1:100]
+var_data = norm_data[select_var,]
+
+## Get some nicer colours
+mypalette <- brewer.pal(11,"RdYlBu")
+morecols <- colorRampPalette(mypalette)
+# Set up colour vector for celltype variable
+col.cell <- c("purple","orange", "red")[as.factor(subset(sampleTab, condition %in% c("mock", "wt_i", "3M_i"))$condition)]
+
+# Plot the heatmap
+heatmap.2(var_data,col=rev(morecols(50)),trace="none", main="Top 100 most variable transcripts across samples",ColSideColors=col.cell,scale="row")
+```
+
+# Analysis of differential genes expression
+The focus is on differential gene expression, not differential expression of transcripts. The quality checks focus on transcripts, because the underlying data allows for the analysis of transcript expression.
+
+## Differential gene expression
+
+### Wild type infection vs. mock
+The results from the Wald test for differential gene expression: the table contains the statistically significantly differentially expressed genes comparing wild type infection vs. mock.
+```{r}
+# Wald Test wt vs. mock
+  sleuthRes1 <- sleuth_results(so_list$`c("mock", "wt_i")`, 'conditionwt_i', show_all = FALSE, pval_aggregate = TRUE)
+  sleuth_significant <- filter(sleuthRes1, qval < 0.05)
+  print(dim(sleuth_significant))
+  kbl(sleuth_significant) %>%
+    kable_paper() %>%
+    scroll_box(width = "100%", height = "500px")
+```
+
+### Wild type infection vs. triple mutant infection
+This table contains the results from the Wald test for differential gene expression from wild type invection vs. triple mutant infection.
+```{r}
+# Wald Test wt vs. 3m
+  sleuthRes2 <- sleuth_results(so_list$`c("wt_i", "3M_i")`, 'conditionwt_i', show_all = FALSE, pval_aggregate = T)
+  sleuth_significant <- filter(sleuthRes2, qval < 0.05)
+  print(dim(sleuth_significant))
+  kbl(sleuth_significant) %>%
+    kable_paper() %>%
+    scroll_box(width = "100%", height = "500px")
+```
+
+### Wild mock vs. triple mutant infection
+This table contains the results from the Wald test for differential gene expression from wild type invection vs. triple mutant infection.
+```{r}
+# Wald Test wt vs. 3m
+  sleuthRes3 <- sleuth_results(so_list$`c("mock", "3M_i")`, 'conditionmock', show_all = FALSE, pval_aggregate = T)
+  sleuth_significant <- filter(sleuthRes3, qval < 0.05)
+  print(dim(sleuth_significant))
+  kbl(sleuth_significant) %>%
+    kable_paper() %>%
+    scroll_box(width = "100%", height = "500px")
+```
+
+## Differential gene expression in p53 associated genes
+
+Here, only genes associated with p53 were investigated. Differential gene expression was first investigated for wildtype vs. mock. Differentially expressed genes comparing mock and wild type were then selected for incestigating their differences comparing wildtype and triple mutant infection. A q-value < 0.1 was selected as cut-off.
+
+### Venn diagrams of DEGs
+```{r}
+q_cut = 0.1
+sleuthRes = inner_join(sleuthRes1,
+                        sleuthRes2,
+                        suffix = c(".1", ".2"),
+                        by = c("target_id" = "target_id",
+                               "ext_gene" = "ext_gene"))
+
+venn_list1 = list("Mock vs. WT" = subset(sleuthRes1, qval < q_cut)$target_id,
+                 "WT vs. 3M" = subset(sleuthRes2, qval < q_cut)$target_id,
+                 "Mock vs. 3M" = subset(sleuthRes3, qval < q_cut)$target_id)
+
+
+# join data with p53 associated genes and filter
+res1 = inner_join(sleuthRes1, p53Genes, by = c("target_id" = "ensembl ID"))
+res2 = inner_join(sleuthRes2, p53Genes, by = c("target_id" = "ensembl ID"))
+res3 = inner_join(sleuthRes3, p53Genes, by = c("target_id" = "ensembl ID"))
+res1$qval = p.adjust(res1$pval, method = "BH")
+res2$qval = p.adjust(res2$pval, method = "BH")
+res3$qval = p.adjust(res3$pval, method = "BH")
+
+res4join = inner_join(sleuthRes1,
+                       sleuthRes2,
+                       suffix = c("_wt_mock", "wt_3m"),
+                       by = c("target_id" = "target_id",
+                              "ext_gene" = "ext_gene"))
+write_csv(res4join, "res4join.csv")
+
+res = full_join(res1,
+                res2,
+                by = c("target_id", "ext_gene", "Gene Symbol"),
+                suffix = c(".mock_wt", ".wt_3m")) %>%
+      filter(qval.wt_3m < q_cut | qval.mock_wt < q_cut )
+
+
+venn_list2 = list("Mock vs. WT" = subset(res1, qval < q_cut)$target_id,
+                 "WT vs. 3M" = subset(res2, qval < q_cut)$target_id,
+                 "Mock vs. 3M" = subset(res3, qval < q_cut)$target_id)
+
+
+
+# add entrez ids
+res$entrez = mapIds(org.Hs.eg.db,
+                    keys=res$target_id, 
+                    column="ENTREZID",
+                    keytype="ENSEMBL",
+                    multiVals="first")
+
+
+ggVennDiagram(venn_list1) + ggtitle("All genes") + scale_fill_gradient(low="white", high="#2166AC")
+
+ggVennDiagram(venn_list2) + ggtitle("p53 associated genes") + scale_fill_gradient(low="white", high="#2166AC")
+
+
+```
+
+
+### Table with the resulting DEGs
+This table contains p and q values for the resulting genes. pval.1 and qval.1 refer to wt vs. mock. pval.2and qval.2 refer to wt vs. 3m. 
+```{r}
+
+# Add GO terms
+## Function for extracting GO terms
+get_terms = function(f.cat, gene_ids){
+    gos = getgo(gene_ids, "hg19",id = "ensGene", fetch.cats = f.cat)
+    res$go_biological_process = lapply(gos,
+                                       function(go_cat) ifelse(!is.null(go_cat) & !is.na(go_cat),
+                                                               sapply(go_cat,
+                                                                      function(x) tryCatch(Term(GOTERM[[x]]),
+                                                                                           error = function(e) "")),
+                                                               "")) %>%
+        lapply(paste, collapse = "; ")
+}
+
+## Extract and add GO terms
+res$go_biological_process = get_terms("GO:BP", res$target_id)
+res$go_mollecular_function = get_terms("GO:MF", res$target_id)
+res$go_cellular_component = get_terms("GO:CC", res$target_id)
+
+# Write result
+write.xlsx(res, "results/mock vs wt or wt vs 3m (adjusted, tested genes n = 343, q-value 0.1).xlsx")
+
+# Show results
+print(dim(res))
+kbl(res %>% select(!starts_with("go_"))) %>%
+    kable_paper() %>%
+    scroll_box(width = "100%", height = "500px")
+
+```
+
+
+
+
+## Plot results
+
+### Boxplot of transcripts per gene
+Plot normalized transcript counts of the significantly differentially expressed and p53 associated genes .
+```{r fig.height=8, fig.width=10}
+# select sig. trsnscripts
+res2 = inner_join(sleuth_results(so_list$`c("wt_i", "3M_i")`, 'conditionwt_i', show_all = FALSE, pval_aggregate = F),
+                 res %>% select(starts_with(c("pval", "qval", "ext_gene")))) %>%
+                 arrange(ext_gene, pval) %>%
+                 filter(!duplicated(ext_gene) & qval.wt_3m < q_cut)
+
+# get count data for plotting
+norm_data = sleuth_to_matrix(so_list$`c("mock", "wt_i", "3M_i")`, which_df = "obs_norm", which_units = "est_counts")
+normData = as_tibble(norm_data)
+normData$target_id = rownames(norm_data)
+normData = normData %>%
+  inner_join(x = res2, by = c("target_id" = "target_id")) %>%
+  pivot_longer(cols = colnames(normData)[grep("MUC", colnames(normData))]) %>%
+  inner_join(y = sampleTab, by = c("name" = "sample")) 
+normData$condition = factor(normData$condition, levels = c("mock", "wt_i", "3M_i"))
+
+# plotting
+ggplot(normData, aes(x = condition, y = value, fill = condition)) + 
+  geom_boxplot() + 
+  geom_point() + 
+  facet_wrap(.~ext_gene, scales = "free", ncol = 7) +
+  theme_bw() + ylab("Normalized transcript count")
+
+
+```
+
+
+### Heatmap of differentially expressed transcripts
+This heatmap shows the normalized transcript counts of the significantly deferentially expressed transcripts of the overall significantly differentially expressed genes across samples. The purple bar indicates the 3m samples. The orange bar indicates wild type samples.
+```{r fig.height=10, fig.width=10}
+resHeatmap = full_join(sleuth_results(so_list$`c("wt_i", "3M_i")`, 'conditionwt_i', show_all = FALSE, pval_aggregate = F),
+                 res %>% select(starts_with(c("pval", "qval", "ext_gene"))), by = c("ext_gene" = "ext_gene")) %>%
+                 arrange(ext_gene, pval) %>%
+                 filter(qval.wt_3m < q_cut & pval < 0.05)
+
+norm_data = sleuth_to_matrix(so_list$`c("wt_i", "3M_i")`, which_df = "obs_norm", which_units = "est_counts")
+
+included_transcripts = resHeatmap
+var_data = norm_data[included_transcripts$target_id,]
+rownames(var_data) = included_transcripts$ext_gene
+
+
+## Get some nicer colours
+mypalette <- brewer.pal(11,"RdYlBu")
+morecols <- colorRampPalette(mypalette)
+# Set up colour vector for celltype variable
+col.cell <- c("purple","orange")[as.factor(subset(sampleTab, condition %in% c("wt_i", "3M_i"))$condition)]
+
+# Plot the heatmap
+library(pvclust)
+heatmap.2(var_data,col=rev(morecols(50)),
+          trace="none",
+          main="Transcripts of differentially expressed genes",ColSideColors=col.cell,
+          scale="row",
+          dendrogram = "row",
+          hclustfun = function(x) hclust(x, method="complete"))
+
+```
+
+
+### Bar plot of DE genes - wt vs. 3m
+Plot normalized transcript counts of the significantly deferentially expressed genes (only most significantly differentially expressed transcripts).
+
+```{r eval=FALSE, include=FALSE}
+ggplot(normData, aes(x = ext_gene, y = value, fill = condition)) + 
+  geom_bar(stat="identity", position=position_dodge()) + scale_y_sqrt() +
+  theme_bw() + ylab("Normalized transcript count") + theme(axis.text.x=element_text(angle = 90, vjust = 0.5))
+```
+
+
+```{r}
+resBarplot = full_join(sleuth_results(so_list$`c("wt_i", "3M_i")`, 'conditionwt_i', show_all = FALSE, pval_aggregate = F),
+                 res %>% select(starts_with(c("pval", "qval", "ext_gene"))), by = c("ext_gene" = "ext_gene")) %>%
+                 arrange(ext_gene, pval) %>%
+                 filter(qval.wt_3m < q_cut)
+
+# remove target ids and replace with numbers for plotting
+norm_data = sleuth_to_matrix(so_list$`c("mock", "wt_i", "3M_i")`, which_df = "obs_norm", which_units = "est_counts")
+normData = as_tibble(norm_data)
+normData$target_id = rownames(norm_data)
+
+
+df2 = resBarplot %>%
+    arrange(ext_gene, pval, desc(b^2)) %>%
+    filter(!duplicated(ext_gene))
+
+normData = normData %>%
+  inner_join(x = df2, by = c("target_id" = "target_id")) %>%
+  pivot_longer(cols = colnames(normData)[grep("MUC", colnames(normData))]) %>%
+  inner_join(y = sampleTab, by = c("name" = "sample"))
+normData$condition = factor(normData$condition, levels = c("mock", "wt_i", "3M_i"))
+
+# normData$ens_gene_num = normData$target_id
+# normData$ens_gene_num = factor(normData$ens_gene_num)
+# levels(normData$ens_gene_num) = 1:length(levels(normData$ens_gene_num))
+# normData$gene_id = paste(normData$ext_gene, normData$ens_gene_num, sep = "_")
+# plot bar plot
+ggplot(normData, aes(x = ext_gene, y = value, fill = condition)) + 
+  # geom_boxplot()  +
+  geom_bar(stat="identity", position=position_dodge()) + scale_y_sqrt() +
+  theme_bw() + ylab("Normalized transcript count") + theme(axis.text.x=element_text(angle = 90, vjust = 0.5)) 
+
+```
+
+Genes in figure:
+```{r}
+kbl(df2) %>%
+    kable_paper() %>%
+    scroll_box(width = "100%", height = "500px")
+```
+
+## Functional analysis of differentially expressed genes
+GO terms were mapped to genes which were differentially expressed in both mock vs. wt and wt vs. 3m. 
+
+###  GO terms of DE genes
+This table lists all significantly enriched GO categories and terms.
+```{r}
+# Compute genes vector
+res_join = res %>% add_column(res_right = TRUE)%>% 
+    filter(qval.wt_3m < q_cut)
+genes_df = p53Genes %>%
+    add_column(res_left = TRUE) %>% 
+    add_column(target_id = .$'ensembl ID') %>%
+    select(c(target_id, res_left)) %>% 
+    left_join(res_join) %>%
+    add_column(sDGE = ifelse(!is.na(.$res_right), 1, 0)) 
+genes = genes_df$sDGE
+names(genes) = genes_df$target_id
+
+pwf=nullp(genes,"hg19","ensGene")
+
+GO.wall=goseq(pwf,"hg19","ensGene")
+kbl(dplyr::filter(GO.wall, over_represented_pvalue < 0.05 | under_represented_pvalue < 0.05)) %>%
+    kable_paper() %>%
+    scroll_box(width = "100%", height = "500px")
+
+```
+
+
+
+### Plot go categories
+Plot shows the top 20 enriched GO categories (biological process) for the p53 associated DEGs comparing wt vs 3m.
+```{r}
+goResults <- goseq(pwf, "hg19","ensGene", test.cats=c("GO:BP"))
+
+goResults %>% 
+    top_n(20, wt=-over_represented_pvalue) %>% 
+    mutate(hitsPerc=numDEInCat*100/numInCat) %>% 
+    ggplot(aes(x=hitsPerc, 
+               y=term, 
+               colour=over_represented_pvalue, 
+               size=numDEInCat)) +
+        geom_point() +
+        expand_limits(x=0) +
+        labs(x="Hits (%)", y="GO term", colour="p value", size="Count")
+```
+
+
