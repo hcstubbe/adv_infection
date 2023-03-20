@@ -10,7 +10,7 @@ This repository contains the analyses scripts for the E2A/p53 infection manuscri
 
 - Demultiplexed ONT full-length reads were analyzed for differential gene expression using Oxford Nanopore's [DEG transcriptome pipeline](https://github.com/nanoporetech/pipeline-transcriptome-de).
 
-- 05: Gene expression data from Illumina and PromethION were integrated and analyzed.
+- C1: Gene expression data from Illumina and PromethION were integrated and analyzed.
 
 ## Data availability
 
