@@ -1,0 +1,441 @@
+---
+title: 'RNA-Seq: wild type vs. triple mutant infection ONT-Seq'
+author: "HCS"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '3'
+    df_print: paged
+    toc_float: yes
+    code_folding: hide
+  html_notebook:
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    number_sections: no
+    code_folding: hide
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+
+# Load packages
+```{r}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(biomaRt)
+library(readxl)
+library(openxlsx)
+library(ggVennDiagram)
+library(ggfortify)
+library(RColorBrewer)
+library(gplots)
+library(DT)
+library(ggvenn)
+```
+
+
+
+# Read and process data
+
+
+## Ensembl mappings
+```{r}
+# Map ids to HGNC symbols
+if(!(file.exists("ens_ids.RDS") & file.exists("ens_gti.RDS"))){
+  ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
+}
+if(file.exists("ens_ids.RDS")){
+  ens_ids = readRDS("ens_ids.RDS")
+}else{
+  ens_ids = getBM(attributes = c("hgnc_symbol", "ensembl_gene_id", "description"), mart = ensembl)
+  saveRDS(ens_ids, "ens_ids.RDS")
+}
+if(file.exists("ens_gti.RDS")){
+  ens_gti = readRDS("ens_gti.RDS")
+}else{
+  ens_gti = getBM(attributes = c("ensembl_gene_id", "ensembl_transcript_id", "description"), mart = ensembl)
+  saveRDS(ens_gti, "ens_gti.RDS")
+}
+```
+
+
+
+## p53 associated genes
+```{r}
+p53 = read_excel("supplementaryTableS3.Fischer.et.al.xlsx")
+colnames(p53) = c("ensembl_gene_id", "hgnc_symbol")
+```
+
+
+
+## Illumina RNA-seq
+```{r}
+results_dge_1 = read_csv("res4join.csv")
+```
+
+
+### ONT Counts
+```{r}
+
+format_counts = function(counts){
+    counts$Reference = sapply(counts$Reference, function(x){
+          y = strsplit(x, split = ".", fixed = TRUE)[[1]][1]
+          return(y)
+          }
+      )
+    counts = dplyr::right_join(ens_gti[,1:2], counts, by = c("ensembl_transcript_id" = "Reference"))
+    colnames(counts)[1:2] = c("gene_id", "transcript_id")
+    return(counts)
+}
+
+counts <- read.csv("data/de_res_wt_3m_ont/all_counts_filtered.tsv", sep="\t")
+# counts <- format_counts(read.csv("data/de_res_wt_3m_ont/all_counts.tsv", sep="\t"))
+colnames(counts)[2] = c("transcript_id")
+
+
+counts_mo_wt <- read.csv("data/de_res_wt_mock/all_counts_filtered.tsv", sep="\t")
+# counts_mo_wt <- format_counts(read.csv("data/de_res_wt_mock/all_counts.tsv", sep="\t"))
+colnames(counts_mo_wt)[2:8] = c("transcript_id", "MO1", "MO2", "MO3", "WT1", "WT2", "WT3")
+
+all_counts = dplyr::full_join(counts, counts_mo_wt[,c("gene_id",
+                                                      "transcript_id",
+                                                      "MO1",
+                                                      "MO2",
+                                                      "MO3")],
+                              by = c("gene_id", "transcript_id"))
+
+# Normalize all_counts:
+all_counts_norm = all_counts
+for(i in colnames(all_counts_norm)[-c(1:2)]){
+    all_counts_norm[i] <- all_counts_norm[i] / sum(all_counts_norm[i], na.rm = TRUE) * 100000
+}
+
+```
+
+
+## ONT-RNA-Seq
+```{r}
+results_dge_2 <- read_delim("data/de_res_wt_3m_ont/results_dge-2.csv", 
+    delim = "\t", escape_double = FALSE, 
+    trim_ws = TRUE)
+
+results_dge_3 <- read.csv("data/de_res_wt_mock/results_dge.tsv", sep="\t") %>% as_tibble(rownames = "id")
+
+results_dge_2 = dplyr::full_join(results_dge_2, results_dge_3, ens_ids, by = c("id" = "id"), suffix = c(".wt3m", ".wtmock"))
+
+results_dge_2 = dplyr::left_join(results_dge_2, ens_ids, by = c("id" = "ensembl_gene_id"))
+results_dge_2$p53_associated = results_dge_2$hgnc_symbol %in% p53$hgnc_symbol
+results_dge_2$q_p53 = NA
+results_dge_2$q_p53[results_dge_2$p53_associated == TRUE] = p.adjust(results_dge_2$PValue.wt3m[results_dge_2$p53_associated == TRUE], method = "BH")
+
+results_dge_2 = results_dge_2 %>% filter(id %in% all_counts_norm$gene_id)
+
+write_csv(results_dge_2, "results_dge_2_wt_vs_tm.csv")
+```
+
+
+
+### ONT-Meta data
+```{r}
+# Set up sample data frame:
+coldata <- read.csv("data/de_res_wt_3m_ont/coldata.tsv", row.names="sample", sep="\t")
+coldata$sample_id <- rownames(coldata)
+coldata$condition <- as.factor(coldata$condition)
+coldata$type <-NULL
+coldata$patient <-NULL
+```
+
+
+
+### Sample data
+```{r}
+sampleTab = data.frame(sample = colnames(all_counts_norm[-c(1:2)]), condition = c(rep("WT", 3), rep("TM", 3), rep("MO", 3)))
+```
+
+
+## Join Illumina and ONT
+
+The data of both sequencing methods are merged. The merged data are filtered for significant differential gene expression comparing triple mutant and wild type in both RNA-Seq experiments.
+```{r}
+colnames(results_dge_1) = paste0(colnames(results_dge_1), "_1")
+colnames(results_dge_2) = paste0(colnames(results_dge_2), "_2")
+
+res_full = dplyr::left_join(results_dge_1, results_dge_2, by = c("target_id_1" = "id_2"))
+
+res_write = res_full %>% filter(pvalwt_3m_1 < 0.05 & PValue.wt3m_2 < 0.05) 
+
+write.xlsx(res_full, "data/ont_seq_wt_tm_mock.xlsx")
+
+write.xlsx(res_write, "data/ont_seq_wt_tm_mock_FILTERED.xlsx")
+```
+
+
+# Inspect data
+## DEGs
+Genes which are significantly expressed in both RNA-Seq experiments.
+```{r}
+datatable(res_write[, c("ext_gene_1", "pvalwt_3m_1", "PValue.wt3m_2", "logFC.wt3m_2", "PValue.wtmock_2", "logFC.wtmock_2", "p53_associated_2")])
+```
+
+
+# Visualize results
+
+## PCA
+```{r}
+pca_mtx = all_counts_norm[,-c(1:2)]
+rownames(pca_mtx) = all_counts_norm$transcript_id
+pca_mtx = pca_mtx %>% filter(complete.cases(.))
+pca_mtx = t(as.matrix(pca_mtx))
+pca = prcomp(pca_mtx, center = TRUE,scale. = TRUE)
+pca_df = data.frame(id = substr(rownames(pca_mtx), 1, 2), pca_mtx)
+autoplot(pca, data = pca_df, shape = FALSE, label.size = 4, colour = 'id') + ggtitle("PCA") + theme_light()
+```
+
+**Fig. X. Principle component analysis.** Two principle components of all transcript counts within the Nanopore dataset. The percentage of total variance, which is reflected in each principle component, is given as percentage.
+
+
+## Heatmaps
+### All DEGs
+```{r fig.height=10, fig.width=10}
+norm_data = all_counts_norm
+rownames(norm_data) = norm_data$transcript_id
+included_genes = res_full[order(res_full$PValue.wt3m_2),][1:50,]$target_id_1
+
+included_transcripts = all_counts_norm[all_counts_norm$gene_id %in% included_genes,"transcript_id"]
+c_names = all_counts_norm[all_counts_norm$gene_id %in% included_genes,""]
+sel_norm_data = filter(norm_data[included_transcripts,], complete.cases(norm_data[included_transcripts,]))
+
+sel_norm_data = dplyr::left_join(sel_norm_data, ens_ids[, c("hgnc_symbol", "ensembl_gene_id")], by = c("gene_id" = "ensembl_gene_id"))
+rownames(sel_norm_data) = make.unique(sel_norm_data$hgnc_symbol)
+
+sel_norm_data = as.matrix(sel_norm_data[,-c(1,2,12)])
+
+## Get some nicer colours
+mypalette <- brewer.pal(11,"RdYlBu")
+morecols <- colorRampPalette(mypalette)
+col.cell <- c("purple","orange", "red")[as.factor(subset(sampleTab, condition %in% c("MO", "WT", "TM"))$condition)]
+
+
+# Plot the heatmap
+heatmap.2(sel_norm_data,col=rev(morecols(50)),trace="none", main="Transcripts of top 50 genes across samples",ColSideColors=col.cell,scale="row", )
+```
+
+**Fig. X. Heatmap of top 50 diferentially expressed genes.** The heatmap shows normalized counts of the top 50 diferentially expressed genes across samples. The purple, orange and red bars represent triple mutant infection, mock and wild type infection, respectively. Differential gene expression was computed for WT vs. 3M.
+
+
+
+
+### p53
+```{r fig.height=10, fig.width=10}
+norm_data = all_counts_norm
+rownames(norm_data) = norm_data$transcript_id
+setlist = list(#"Illumina - WT vs. MO" = filter(results_dge_1, pval_wt_mock_1 < 0.05)$target_id_1,
+    "Illum." = filter(results_dge_1, pvalwt_3m_1 < 0.05)$target_id_1,
+    "Nanop." = filter(results_dge_2, PValue.wt3m_2 < 0.05)$id_2,
+    # "Nanopore" = filter(stageR, p_gene < 0.05)$gene_id,
+    "p53" = p53$ensembl_gene_id)
+
+included_genes = intersect(intersect(setlist[[1]], setlist[[2]]), setlist[[3]])
+
+included_transcripts = all_counts_norm[all_counts_norm$gene_id %in% included_genes,"transcript_id"]
+c_names = all_counts_norm[all_counts_norm$gene_id %in% included_genes,""]
+sel_norm_data = filter(norm_data[included_transcripts,], complete.cases(norm_data[included_transcripts,]))
+
+sel_norm_data = dplyr::left_join(sel_norm_data, ens_ids[, c("hgnc_symbol", "ensembl_gene_id")], by = c("gene_id" = "ensembl_gene_id"))
+rownames(sel_norm_data) = make.unique(sel_norm_data$hgnc_symbol)
+
+sel_norm_data = as.matrix(sel_norm_data[,-c(1,2,12)])
+
+## Get some nicer colours
+mypalette <- brewer.pal(11,"RdYlBu")
+morecols <- colorRampPalette(mypalette)
+col.cell <- c("purple","orange", "red")[as.factor(subset(sampleTab, condition %in% c("MO", "WT", "TM"))$condition)]
+
+
+# Plot the heatmap
+heatmap.2(sel_norm_data,col=rev(morecols(50)),trace="none", main="Transcripts of top p53-associated genes across samples",ColSideColors=col.cell,scale="row", )
+```
+
+**Fig. X. Heatmap of p53-associated and diferentially expressed genes.** The heatmap shows normalized counts of the p53-associated and most significantly diferentially expressed genes across samples. The purple, orange and red bars represent triple mutant infection, mock and wild type infection, respectively. Differential gene expression was computed for WT vs. 3M.
+
+### p53 without Mock
+```{r fig.height=10, fig.width=10}
+norm_data = all_counts_norm
+rownames(norm_data) = norm_data$transcript_id
+setlist = list(#"Illumina - WT vs. MO" = filter(results_dge_1, pval_wt_mock_1 < 0.05)$target_id_1,
+    "Illum." = filter(results_dge_1, pvalwt_3m_1 < 0.05)$target_id_1,
+    "Nanop." = filter(results_dge_2, PValue.wt3m_2 < 0.05)$id_2,
+    # "Nanopore" = filter(stageR, p_gene < 0.05)$gene_id,
+    "p53" = p53$ensembl_gene_id)
+
+included_genes = intersect(intersect(setlist[[1]], setlist[[2]]), setlist[[3]])
+
+included_transcripts = all_counts_norm[all_counts_norm$gene_id %in% included_genes,"transcript_id"]
+c_names = all_counts_norm[all_counts_norm$gene_id %in% included_genes,""]
+sel_norm_data = filter(norm_data[included_transcripts,], complete.cases(norm_data[included_transcripts,]))
+
+sel_norm_data = dplyr::left_join(sel_norm_data, ens_ids[, c("hgnc_symbol", "ensembl_gene_id")], by = c("gene_id" = "ensembl_gene_id"))
+rownames(sel_norm_data) = make.unique(sel_norm_data$hgnc_symbol)
+
+sel_norm_data = as.matrix(sel_norm_data[,-c(1,2,12)])
+
+## Get some nicer colours
+mypalette <- brewer.pal(11,"RdYlBu")
+morecols <- colorRampPalette(mypalette)
+col.cell <- c("purple","orange", "red")[as.factor(subset(sampleTab, condition %in% c("WT", "TM"))$condition)]
+
+
+# Plot the heatmap
+heatmap.2(sel_norm_data[,1:6],col=rev(morecols(50)),trace="none", main="Transcripts of top p53-associated genes across samples",ColSideColors=col.cell,scale="row", )
+```
+
+**Fig. X. Heatmap of p53-associated and diferentially expressed genes.** The heatmap shows normalized counts of the p53-associated and diferentially expressed genes across samples. The purple, orange and red bars represent triple mutant infection, mock and wild type infection, respectively. Differential gene expression was computed for WT vs. 3M.
+
+
+
+## Venn diagrams
+### Illumina vs. Nanopore
+```{r, dpi=600}
+venn_list = list("Illumina" = filter(results_dge_1, pvalwt_3m_1 < 0.05)$target_id_1,
+                 "Nanopore" = filter(results_dge_2, PValue.wt3m_2 < 0.05)$id_2,
+                 "p53" = p53$ensembl_gene_id)
+vp = ggvenn(venn_list, show_percentage = F, fill_color = brewer.pal(3, "Blues")) 
+vp
+```
+
+**Figure X. Venn diagram of differentially expressed genes and to p53-associated genes.** The Venn diagram shows differentially expressed genes comparing WT with 3M infection together with genes associated with p53. Differential gene expression was computed for WT vs. 3M.
+
+
+### Illumina: WT/MOCK/3M
+```{r, dpi=600}
+venn_list = list("WT/Mock" = filter(results_dge_1, pval_wt_mock_1 < 0.05)$target_id_1,
+                 "WT/3M" = filter(results_dge_1, pvalwt_3m_1 < 0.05)$target_id_1,
+                 "p53" = p53$ensembl_gene_id)
+vp = ggvenn(venn_list, show_percentage = F, fill_color = brewer.pal(3, "Blues"))
+vp
+```
+
+**Figure X. Venn diagram of differentially expressed genes and to p53-associated genes (Illumina dataset).** The Venn diagram shows differentially expressed genes comparing WT vs. 3M infection with WT vs. Mock together with genes associated with p53. Differential gene expression was computed for WT vs. 3M and for WT vs. Mock.
+
+
+## Barplots
+### Transcript counts
+```{r}
+norm_data = all_counts_norm
+rownames(norm_data) = norm_data$transcript_id
+setlist = list(#"Illumina - WT vs. MO" = filter(results_dge_1, pval_wt_mock_1 < 0.05)$target_id_1,
+    "Illum." = filter(results_dge_1, pvalwt_3m_1 < 0.05)$target_id_1,
+    "Nanop." = filter(results_dge_2, PValue.wt3m_2 < 0.05)$id_2,
+    # "Nanopore" = filter(stageR, p_gene < 0.05)$gene_id,
+    "p53" = p53$ensembl_gene_id)
+
+included_genes = intersect(intersect(setlist[[1]], setlist[[2]]), setlist[[3]])
+
+included_transcripts = all_counts_norm[all_counts_norm$gene_id %in% included_genes,"transcript_id"]
+c_names = all_counts_norm[all_counts_norm$gene_id %in% included_genes,""]
+sel_norm_data = filter(norm_data[included_transcripts,], complete.cases(norm_data[included_transcripts,]))
+
+normData = sel_norm_data %>%
+    left_join(y = res_full, by = c("gene_id" = "target_id_1")) %>%
+    pivot_longer(cols = colnames(sel_norm_data)[3:11]) %>%
+    inner_join(y = sampleTab, by = c("name" = "sample")) 
+normData$condition = factor(normData$condition, levels = c("MO", "WT", "TM"))
+
+ggplot(normData, aes(x = hgnc_symbol_2, y = value, fill = condition)) + 
+  geom_bar(stat="identity", position=position_dodge()) +
+  theme_minimal() + 
+  scale_y_sqrt() +
+  ylab("Normalized transcript count") + 
+  theme(axis.text.x=element_text(angle = 90, vjust = 0.5))
+
+```
+
+**Fig. X. Normalized transcript counts per gene.** Normalized transcript counts for each gene were pooled. The x-axis was sqrt-transformed for better visualization.
+
+### Log fold-change
+```{r}
+x <- filter(results_dge_2, PValue.wt3m_2 < 0.05 & results_dge_2$p53_associated_2 & id_2 %in% filter(results_dge_1, pvalwt_3m_1 < 0.05)$target_id_1)
+x <- x[,c("hgnc_symbol_2", "logFC.wt3m_2", "logFC.wtmock_2")]
+z = pivot_longer(x, c(2:3), values_to = "logFC")
+z$name = gsub("_2", "",  z$name)
+z$name = gsub("logFC.", "",  z$name)
+z$name = stringr::str_to_upper(z$name)
+colnames(z)[1] ="gene"
+colnames(z)[2] ="comparison"
+
+# z$logFC[z$comparison == "WTMOCK"] = z$logFC[z$comparison == "WTMOCK"] * -1 # invert to switch exposure and control
+
+p <- ggplot(z, aes(gene,logFC, fill = comparison)) + geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Expression of p53-associated DEGs")
+p
+```
+
+**Fig. X. Log fold-change per gene.** Log fold-change for each gene comparing MOCK and 3M infection to WT infection. 
+
+## Boxplots
+
+### p53
+```{r fig.height=8, fig.width=10}
+norm_data = all_counts_norm
+rownames(norm_data) = norm_data$transcript_id
+setlist = list(#"Illumina - WT vs. MO" = filter(results_dge_1, pval_wt_mock_1 < 0.05)$target_id_1,
+    "Illum." = filter(results_dge_1, pvalwt_3m_1 < 0.05)$target_id_1,
+    "Nanop." = filter(results_dge_2, PValue.wt3m_2 < 0.05)$id_2,
+    # "Nanopore" = filter(stageR, p_gene < 0.05)$gene_id,
+    "p53" = p53$ensembl_gene_id)
+
+included_genes = intersect(intersect(setlist[[1]], setlist[[2]]), setlist[[3]])
+
+included_transcripts = all_counts_norm[all_counts_norm$gene_id %in% included_genes,"transcript_id"]
+c_names = all_counts_norm[all_counts_norm$gene_id %in% included_genes,""]
+sel_norm_data = filter(norm_data[included_transcripts,], complete.cases(norm_data[included_transcripts,]))
+
+# sel_norm_data = dplyr::left_join(sel_norm_data, ens_ids[, c("hgnc_symbol", "ensembl_gene_id")], by = c("gene_id" = "ensembl_gene_id"))
+# rownames(sel_norm_data) = make.unique(sel_norm_data$hgnc_symbol)
+
+
+normData = sel_norm_data %>%
+    left_join(y = res_full, by = c("gene_id" = "target_id_1")) %>%
+    pivot_longer(cols = colnames(sel_norm_data)[3:11]) %>%
+    inner_join(y = sampleTab, by = c("name" = "sample")) 
+normData$condition = factor(normData$condition, levels = c("MO", "WT", "TM"))
+
+
+# plotting
+ggplot(normData, aes(x = condition, y = value, fill = condition)) + 
+  geom_boxplot() + 
+  geom_point() + 
+  facet_wrap(.~ext_gene_1, scales = "free", ncol = 3) +
+  theme_bw() + ylab("Normalized gene count")
+
+
+
+
+```
+
+**Fig. X. Normalized transcript counts per gene.** The plot shows normalized transcript counts of the significantly differentially expressed and p53 associated genes per gene. Differential gene expression was computed for WT vs. 3M.
+
+### p53 (transcripts)
+```{r fig.height=40, fig.width=10}
+ggplot(normData, aes(x = condition, y = value, fill = condition)) + 
+  geom_boxplot() + 
+  geom_point() + 
+  facet_wrap(.~ext_gene_1+transcript_id, scales = "free", ncol = 3) +
+  theme_bw() + ylab("Normalized transcript count")
+
+```
+
+**Fig. X. Normalized transcript counts per transcript.** The plot shows normalized transcript counts of the significantly differentially expressed and p53 associated genes per transcript. Differential gene expression was computed for WT vs. 3M.
+
